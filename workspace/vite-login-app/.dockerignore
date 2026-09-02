@@ -1,0 +1,8 @@
+.git
+.gitea
+node_modules
+dist
+.env*
+npm-debug.log*
+README.md
+

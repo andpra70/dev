@@ -1,0 +1,4 @@
+{
+  "insecure-registries": ["gitea:3000"]
+}
+

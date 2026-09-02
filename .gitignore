@@ -1,5 +1,12 @@
 .env
-gitlab-data/
+gitea-data/
+gitea-config/
+gitea-runner-data/
+!gitea-runner/
+dockge-data/
+dockge-stacks/
+dockge-docker-config/
+dockge-docker-data/
 postgres-data/
 redis-data/
 mongodb-data/

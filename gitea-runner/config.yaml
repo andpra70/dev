@@ -1,0 +1,9 @@
+runner:
+  capacity: 1
+
+container:
+  # Rende il nome usato da ROOT_URL e dal registry raggiungibile anche nei job
+  # creati dal Docker-in-Docker del runner.
+  options: "--add-host=gitea:172.31.254.10"
+  privileged: false
+

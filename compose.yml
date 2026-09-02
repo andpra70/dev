@@ -25,35 +25,118 @@ services:
       vscode_docker:
         ipv4_address: 172.31.254.2
 
-  gitlab:
-    image: "gitlab/gitlab-ce:${GITLAB_VERSION:-latest}"
-    container_name: isolated_vscode_gitlab
-    hostname: "${GITLAB_HOSTNAME:-gitlab.local}"
+  # Gitea rootless con database SQLite incorporato.
+  gitea:
+    image: "docker.gitea.com/gitea:${GITEA_VERSION:-latest-rootless}"
+    container_name: isolated_vscode_gitea
     restart: unless-stopped
-    shm_size: 256m
     environment:
-      GITLAB_ROOT_PASSWORD: "${GITLAB_ROOT_PASSWORD:?Impostare GITLAB_ROOT_PASSWORD}"
-      GITLAB_OMNIBUS_CONFIG: |
-        external_url '${GITLAB_EXTERNAL_URL:-http://127.0.0.1:8929}'
-        gitlab_rails['initial_root_password'] = ENV['GITLAB_ROOT_PASSWORD']
-        gitlab_rails['initial_root_email'] = '${GITLAB_ROOT_EMAIL:-root@local.invalid}'
-        gitlab_rails['gitlab_shell_ssh_port'] = ${GITLAB_SSH_PORT:-2224}
+      USER_UID: "1000"
+      USER_GID: "1000"
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__database__PATH: /var/lib/gitea/data/gitea.db
+      GITEA__server__DOMAIN: "${GITEA_DOMAIN:-gitea}"
+      GITEA__server__SSH_DOMAIN: "${GITEA_DOMAIN:-gitea}"
+      GITEA__server__ROOT_URL: "${GITEA_ROOT_URL:-http://gitea:3000/}"
+      GITEA__server__SSH_PORT: "${GITEA_SSH_PORT:-2225}"
+      GITEA__server__SSH_LISTEN_PORT: "2222"
+      GITEA__actions__ENABLED: "true"
     ports:
-      - "127.0.0.1:${GITLAB_HTTP_PORT:-8929}:${GITLAB_HTTP_PORT:-8929}"
-      - "127.0.0.1:${GITLAB_SSH_PORT:-2224}:22"
+      - "127.0.0.1:${GITEA_HTTP_PORT:-3001}:3000"
+      - "127.0.0.1:${GITEA_SSH_PORT:-2225}:2222"
     volumes:
-      - ./gitlab-data/config:/etc/gitlab
-      - ./gitlab-data/logs:/var/log/gitlab
-      - ./gitlab-data/data:/var/opt/gitlab
+      - ./gitea-data:/var/lib/gitea
+      - ./gitea-config:/etc/gitea
     healthcheck:
-      test: ["CMD-SHELL", "/opt/gitlab/bin/gitlab-healthcheck --fail --max-time 10 || exit 1"]
-      interval: 30s
-      timeout: 15s
-      retries: 20
-      start_period: 10m
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:3000/api/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
     networks:
       vscode_docker:
-        ipv4_address: 172.31.254.4
+        ipv4_address: 172.31.254.10
+
+  # Runner Actions con daemon Docker-in-Docker proprio e senza socket host.
+  gitea-runner:
+    image: "docker.io/gitea/runner:${GITEA_RUNNER_VERSION:-3}-dind"
+    container_name: isolated_gitea_runner
+    profiles: ["gitea-ci"]
+    privileged: true
+    restart: unless-stopped
+    environment:
+      GITEA_INSTANCE_URL: "${GITEA_RUNNER_URL:-http://gitea:3000}"
+      GITEA_RUNNER_REGISTRATION_TOKEN: "${GITEA_RUNNER_TOKEN:-}"
+      GITEA_RUNNER_NAME: "${GITEA_RUNNER_NAME:-isolated-gitea-runner}"
+      GITEA_RUNNER_LABELS: "${GITEA_RUNNER_LABELS:-ubuntu-latest:docker://node:22-bookworm,ubuntu-22.04:docker://node:22-bookworm}"
+      CONFIG_FILE: /runner-config/config.yaml
+    depends_on:
+      gitea:
+        condition: service_healthy
+    volumes:
+      - ./gitea-runner-data:/data
+      - ./gitea-runner/config.yaml:/runner-config/config.yaml:ro
+      - ./gitea-runner/daemon.json:/etc/docker/daemon.json:ro
+      - gitea_runner_docker_data:/var/lib/docker
+    networks:
+      vscode_docker:
+        ipv4_address: 172.31.254.11
+
+  # Daemon separato usato esclusivamente dagli stack gestiti da Dockge.
+  # Non monta il socket Docker dell'host.
+  dockge-docker:
+    image: "docker:${DOCKGE_DOCKER_VERSION:-27}-dind"
+    container_name: isolated_dockge_docker
+    privileged: true
+    restart: unless-stopped
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command:
+      - --host=tcp://0.0.0.0:2375
+      - --host=unix:///var/run/docker.sock
+      - --insecure-registry=gitea:3000
+    expose:
+      - "2375"
+    ports:
+      # Le applicazioni annidate possono pubblicare soltanto questa fascia.
+      - "127.0.0.1:${DOCKGE_APP_PORT_START:-18000}-${DOCKGE_APP_PORT_END:-18099}:18000-18099"
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    volumes:
+      - ./dockge-docker-data:/var/lib/docker
+      # Lo stesso percorso assoluto è montato anche in Dockge: i bind mount
+      # relativi degli stack vengono così risolti dal daemon nel posto giusto.
+      - ./dockge-stacks:/opt/stacks
+    networks:
+      vscode_docker:
+        ipv4_address: 172.31.254.12
+
+  dockge:
+    image: "louislam/dockge:${DOCKGE_VERSION:-1}"
+    container_name: isolated_dockge
+    restart: unless-stopped
+    environment:
+      DOCKER_HOST: tcp://dockge-docker:2375
+      DOCKGE_STACKS_DIR: /opt/stacks
+      PUID: "1000"
+      PGID: "1000"
+    depends_on:
+      dockge-docker:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${DOCKGE_HTTP_PORT:-5001}:5001"
+    volumes:
+      - ./dockge-data:/app/data
+      - ./dockge-stacks:/opt/stacks
+      # Credenziali dei registry separate da quelle dell'host.
+      - ./dockge-docker-config:/root/.docker
+    networks:
+      vscode_docker:
+        ipv4_address: 172.31.254.13
 
   postgres:
     image: "postgres:${POSTGRES_VERSION:-17-alpine}"
@@ -201,7 +284,7 @@ services:
     # i nomi Internet continuano a usare resolver espliciti.
     extra_hosts:
       - "docker:172.31.254.2"
-      - "gitlab:172.31.254.4"
+      - "gitea:172.31.254.10"
       - "postgres:172.31.254.5"
       - "redis:172.31.254.6"
       - "mongodb:172.31.254.7"
@@ -224,6 +307,7 @@ volumes:
   vscode_config:
   vscode_data:
   vscode_docker_data:
+  gitea_runner_docker_data:
 
 networks:
   vscode_docker:

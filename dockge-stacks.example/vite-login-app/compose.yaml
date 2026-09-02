@@ -1,0 +1,11 @@
+services:
+  app:
+    image: gitea:3000/dev/test:latest
+    container_name: deployed_vite_login_app
+    restart: unless-stopped
+    pull_policy: always
+    ports:
+      # Questa porta attraversa il DinD ed è pubblicata su localhost dall'host.
+      - "18081:8080"
+    extra_hosts:
+      - "gitea:172.31.254.10"
