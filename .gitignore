@@ -1,0 +1,7 @@
+.env
+gitlab-data/
+postgres-data/
+redis-data/
+mongodb-data/
+mongodb-config/
+node_modules/

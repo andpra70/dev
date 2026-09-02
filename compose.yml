@@ -1,0 +1,233 @@
+services:
+  # Docker-in-Docker separato: non monta il socket Docker dell'host e quindi
+  # i comandi eseguiti da VS Code vedono soltanto questo daemon annidato.
+  docker:
+    image: docker:27-dind
+    container_name: isolated_vscode_docker
+    privileged: true
+    restart: unless-stopped
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command:
+      - --host=tcp://0.0.0.0:2375
+      - --host=unix:///var/run/docker.sock
+    expose:
+      - "2375"
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    volumes:
+      - vscode_docker_data:/var/lib/docker
+    networks:
+      vscode_docker:
+        ipv4_address: 172.31.254.2
+
+  gitlab:
+    image: "gitlab/gitlab-ce:${GITLAB_VERSION:-latest}"
+    container_name: isolated_vscode_gitlab
+    hostname: "${GITLAB_HOSTNAME:-gitlab.local}"
+    restart: unless-stopped
+    shm_size: 256m
+    environment:
+      GITLAB_ROOT_PASSWORD: "${GITLAB_ROOT_PASSWORD:?Impostare GITLAB_ROOT_PASSWORD}"
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url '${GITLAB_EXTERNAL_URL:-http://127.0.0.1:8929}'
+        gitlab_rails['initial_root_password'] = ENV['GITLAB_ROOT_PASSWORD']
+        gitlab_rails['initial_root_email'] = '${GITLAB_ROOT_EMAIL:-root@local.invalid}'
+        gitlab_rails['gitlab_shell_ssh_port'] = ${GITLAB_SSH_PORT:-2224}
+    ports:
+      - "127.0.0.1:${GITLAB_HTTP_PORT:-8929}:${GITLAB_HTTP_PORT:-8929}"
+      - "127.0.0.1:${GITLAB_SSH_PORT:-2224}:22"
+    volumes:
+      - ./gitlab-data/config:/etc/gitlab
+      - ./gitlab-data/logs:/var/log/gitlab
+      - ./gitlab-data/data:/var/opt/gitlab
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/gitlab/bin/gitlab-healthcheck --fail --max-time 10 || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 20
+      start_period: 10m
+    networks:
+      vscode_docker:
+        ipv4_address: 172.31.254.4
+
+  postgres:
+    image: "postgres:${POSTGRES_VERSION:-17-alpine}"
+    container_name: isolated_vscode_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-app}"
+      POSTGRES_USER: "${POSTGRES_USER:-app}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Impostare POSTGRES_PASSWORD}"
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-15432}:5432"
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      vscode_docker:
+        ipv4_address: 172.31.254.5
+
+  redis:
+    image: "redis:${REDIS_VERSION:-7.4-alpine}"
+    container_name: isolated_vscode_redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?Impostare REDIS_PASSWORD}"
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT:-16379}:6379"
+    volumes:
+      - ./redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a $$REDIS_PASSWORD ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      vscode_docker:
+        ipv4_address: 172.31.254.6
+
+  mongodb:
+    image: "mongo:${MONGO_VERSION:-8.0}"
+    container_name: isolated_vscode_mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: "${MONGO_ROOT_USERNAME:-root}"
+      MONGO_INITDB_ROOT_PASSWORD: "${MONGO_ROOT_PASSWORD:?Impostare MONGO_ROOT_PASSWORD}"
+      MONGO_INITDB_DATABASE: "${MONGO_DATABASE:-app}"
+    ports:
+      - "127.0.0.1:${MONGO_HOST_PORT:-27018}:27017"
+    volumes:
+      - ./mongodb-data:/data/db
+      - ./mongodb-config:/data/configdb
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --username $$MONGO_INITDB_ROOT_USERNAME --password $$MONGO_INITDB_ROOT_PASSWORD --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 }).ok' | grep -q 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+    networks:
+      vscode_docker:
+        ipv4_address: 172.31.254.7
+
+  volume-init:
+    image: ghcr.io/coder/code-server:4.133.0
+    runtime: runsc
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - mkdir -p /data/codex /data/npm-global && chown -R 1000:1000 /config /data
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      # Necessaria per attraversare volumi persistenti gia' popolati e
+      # correggerne l'ownership; il job non ha rete ne' bind mount host.
+      - DAC_READ_SEARCH
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - vscode_config:/config
+      - vscode_data:/data
+
+  vscode:
+    build:
+      context: .
+      args:
+        CODEX_VERSION: 0.143.0
+    image: isolated-code-server:4.133.0-codex
+    container_name: isolated_vscode
+    runtime: runsc
+    user: "1000:1000"
+    init: true
+    restart: unless-stopped
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+      docker:
+        condition: service_healthy
+
+    # Pubblicazione diretta, limitata all'interfaccia loopback dell'host.
+    ports:
+      - "127.0.0.1:8443:8080"
+    environment:
+      PASSWORD: "${VSCODE_PASSWORD:?Impostare VSCODE_PASSWORD}"
+      # Copilot CLI usa ~/.copilot per stato, sessioni e credenziali fallback.
+      # La home generale resta read-only; solo questi percorsi sono scrivibili.
+      COPILOT_HOME: /home/coder/.local/share/code-server/copilot
+      COPILOT_CACHE_HOME: /home/coder/.cache/copilot
+      # Configurazione, autenticazione e sessioni Codex persistono nel volume
+      # isolato, mentre ~/.codex sulla root read-only non viene utilizzata.
+      CODEX_HOME: /home/coder/.local/share/code-server/codex
+      # npm usa cache effimera e installazioni globali persistenti nel volume,
+      # senza tentare di scrivere in ~/.npm o /usr.
+      NPM_CONFIG_CACHE: /home/coder/.cache/npm
+      NPM_CONFIG_PREFIX: /home/coder/.local/share/code-server/npm-global
+      # Il client controlla esclusivamente il daemon DinD dedicato. Nessun
+      # /var/run/docker.sock dell'host viene esposto al container VS Code.
+      DOCKER_HOST: tcp://docker:2375
+      PATH: /home/coder/.local/share/code-server/npm-global/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games
+    command:
+      - --bind-addr
+      - 0.0.0.0:8080
+      - --auth
+      - password
+      - --disable-telemetry
+      - --disable-update-check
+      - /workspace
+
+    # Espone soltanto questa directory dedicata. Da /workspace/.. il container
+    # arriva alla propria root, non alla directory padre presente sull'host.
+    volumes:
+      - ./workspace:/workspace
+      - vscode_config:/home/coder/.config
+      - vscode_data:/home/coder/.local/share/code-server
+
+    networks:
+      vscode_docker:
+        ipv4_address: 172.31.254.3
+    # Evita la dipendenza dal resolver Docker per raggiungere il daemon;
+    # i nomi Internet continuano a usare resolver espliciti.
+    extra_hosts:
+      - "docker:172.31.254.2"
+      - "gitlab:172.31.254.4"
+      - "postgres:172.31.254.5"
+      - "redis:172.31.254.6"
+      - "mongodb:172.31.254.7"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=512m,uid=1000,gid=1000
+      - /home/coder/.cache:rw,nosuid,nodev,noexec,size=128m,uid=1000,gid=1000
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 4g
+    cpus: 2.0
+
+volumes:
+  vscode_config:
+  vscode_data:
+  vscode_docker_data:
+
+networks:
+  vscode_docker:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.254.0/24
