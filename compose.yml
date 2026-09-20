@@ -1,4 +1,17 @@
 services:
+  # Proxy DNS sulla rete privata: permette ai container gVisor di risolvere
+  # nomi Internet senza dipendere dal resolver loopback di Docker.
+  dns:
+    image: coredns/coredns:1.12.4
+    container_name: isolated_vscode_dns
+    restart: unless-stopped
+    command: ["-conf", "/etc/coredns/Corefile"]
+    volumes:
+      - ./coredns/Corefile:/etc/coredns/Corefile:ro
+    networks:
+      vscode_docker:
+        ipv4_address: 172.31.254.4
+
   # Docker-in-Docker separato: non monta il socket Docker dell'host e quindi
   # i comandi eseguiti da VS Code vedono soltanto questo daemon annidato.
   docker:
@@ -138,6 +151,39 @@ services:
       vscode_docker:
         ipv4_address: 172.31.254.13
 
+  # Inizializza i volumi di Vikunja per il processo applicativo (UID 1000).
+  vikunja-init:
+    image: alpine:3.22
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R 1000:0 /db /files"]
+    network_mode: none
+    restart: "no"
+    volumes:
+      - vikunja_db:/db
+      - vikunja_files:/files
+
+  # Project/task manager leggero con database SQLite incorporato.
+  vikunja:
+    image: "vikunja/vikunja:${VIKUNJA_VERSION:-2.6.0}"
+    container_name: isolated_vscode_vikunja
+    restart: unless-stopped
+    depends_on:
+      vikunja-init:
+        condition: service_completed_successfully
+    environment:
+      VIKUNJA_SERVICE_PUBLICURL: "${VIKUNJA_PUBLIC_URL:-http://localhost:3456/}"
+      VIKUNJA_DATABASE_TYPE: sqlite
+      VIKUNJA_DATABASE_PATH: /db/vikunja.db
+    ports:
+      - "127.0.0.1:${VIKUNJA_HTTP_PORT:-3456}:3456"
+    volumes:
+      - vikunja_db:/db
+      - vikunja_files:/app/vikunja/files
+    networks:
+      vscode_docker:
+        ipv4_address: 172.31.254.14
+
   postgres:
     image: "postgres:${POSTGRES_VERSION:-17-alpine}"
     container_name: isolated_vscode_postgres
@@ -240,6 +286,8 @@ services:
         condition: service_completed_successfully
       docker:
         condition: service_healthy
+      dns:
+        condition: service_started
 
     # Pubblicazione diretta, limitata all'interfaccia loopback dell'host.
     ports:
@@ -276,6 +324,7 @@ services:
       - ./workspace:/workspace
       - vscode_config:/home/coder/.config
       - vscode_data:/home/coder/.local/share/code-server
+      - ./coredns/vscode-resolv.conf:/etc/resolv.conf:ro
 
     networks:
       vscode_docker:
@@ -288,9 +337,7 @@ services:
       - "postgres:172.31.254.5"
       - "redis:172.31.254.6"
       - "mongodb:172.31.254.7"
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
+      - "vikunja:172.31.254.14"
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=512m,uid=1000,gid=1000
@@ -308,9 +355,14 @@ volumes:
   vscode_data:
   vscode_docker_data:
   gitea_runner_docker_data:
+  vikunja_db:
+  vikunja_files:
 
 networks:
   vscode_docker:
+    # Nome stabile: evita che un diverso COMPOSE_PROJECT_NAME tenti di creare
+    # una seconda rete con la stessa subnet 172.31.254.0/24.
+    name: vscode-isolated_vscode_docker
     driver: bridge
     ipam:
       config:

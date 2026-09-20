@@ -9,6 +9,8 @@ Docker separati e non modificano `~/.vscode` o `~/.config/Code` dell'host.
 VS Code può accedere a Internet e ai servizi dello stack attraverso la rete
 privata `vscode_docker`, ma non può risalire dal mount `/workspace` alle altre
 directory host. Tutte le porte pubblicate sono vincolate al loopback dell'host.
+La rete usa il nome Docker stabile `vscode-isolated_vscode_docker`, così un
+diverso `COMPOSE_PROJECT_NAME` non prova a duplicare la subnet riservata.
 
 ## Componenti e porte
 
