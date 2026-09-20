@@ -9,4 +9,4 @@ if [[ -z "${VSCODE_PASSWORD:-}" ]]; then
 fi
 
 docker compose -f "$(dirname "$0")/compose.yml" up -d
-echo "VS Code disponibile su http://127.0.0.1:8443"
+echo "VS Code disponibile su http://127.0.0.1:8080 (password: $VSCODE_PASSWORD)"
