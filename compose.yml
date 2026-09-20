@@ -354,7 +354,9 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=512m,uid=1000,gid=1000
-      - /home/coder/.cache:rw,nosuid,nodev,noexec,size=128m,uid=1000,gid=1000
+      # L'aggiornamento di Codex scarica e prepara binari nativi: 128 MB non
+      # sono sufficienti per la cache temporanea di npm.
+      - /home/coder/.cache:rw,nosuid,nodev,noexec,size=${VSCODE_CACHE_SIZE:-512m},uid=1000,gid=1000
     cap_drop:
       - ALL
     security_opt:

@@ -121,7 +121,8 @@ Al primo avvio completare l'accesso proposto da Codex. Configurazione,
 autenticazione e sessioni sono salvate in `CODEX_HOME` dentro il volume
 persistente `vscode_data`, non nel filesystem o nella home dell'host.
 
-La cache npm è collocata nel `tmpfs`, mentre i pacchetti globali npm sono
+La cache npm è collocata nel `tmpfs` (dimensione configurabile con
+`VSCODE_CACHE_SIZE`, 512 MB per impostazione predefinita), mentre i pacchetti globali npm sono
 persistenti nel volume `vscode_data`. Sono quindi supportati sia `npm install`
 nel progetto sia, quando necessario, l'aggiornamento del CLI:
 
