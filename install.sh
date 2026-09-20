@@ -15,7 +15,8 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gviso
 
 sudo apt-get update && sudo apt-get install -y runsc
 
-sudo /usr/local/bin/runsc install
+sudo /usr/bin/runsc install
+
 sudo systemctl reload docker
 
 docker run --rm --runtime=runsc hello-world

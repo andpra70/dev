@@ -2,13 +2,14 @@
 
 Questo stack esegue `code-server` con `runsc`, un daemon Docker-in-Docker
 dedicato e servizi persistenti Gitea, PostgreSQL, Redis e MongoDB. VS Code è
-esposto soltanto su `127.0.0.1:8443` e monta dall'host esclusivamente
+esposto tramite il reverse proxy e monta dall'host esclusivamente
 `vscode-isolated/workspace`; configurazione ed estensioni vivono in volumi
 Docker separati e non modificano `~/.vscode` o `~/.config/Code` dell'host.
 
 VS Code può accedere a Internet e ai servizi dello stack attraverso la rete
 privata `vscode_docker`, ma non può risalire dal mount `/workspace` alle altre
-directory host. Tutte le porte pubblicate sono vincolate al loopback dell'host.
+directory host. Le interfacce web sono pubblicate da un unico reverse proxy;
+i container applicativi restano sulla rete privata.
 La rete usa il nome Docker stabile `vscode-isolated_vscode_docker`, così un
 diverso `COMPOSE_PROJECT_NAME` non prova a duplicare la subnet riservata.
 
@@ -16,12 +17,13 @@ diverso `COMPOSE_PROJECT_NAME` non prova a duplicare la subnet riservata.
 
 | Servizio | Indirizzo dall'host | Indirizzo da VS Code | Persistenza |
 | --- | --- | --- | --- |
-| code-server | `http://127.0.0.1:8443` | — | volumi `vscode_config`, `vscode_data` |
-| Gitea | `http://127.0.0.1:3001` | `http://gitea:3000` | `gitea-data/`, `gitea-config/` |
+| code-server | `http://<IP-server>:8443` | — | volumi `vscode_config`, `vscode_data` |
+| Gitea | `http://<IP-server>:3001` | `http://gitea:3000` | `gitea-data/`, `gitea-config/` |
 | Gitea SSH | `ssh://git@127.0.0.1:2225` | `ssh://git@gitea:2222` | `gitea-data/` |
 | Gitea Actions Runner | non pubblicato | Gitea Actions | `gitea-runner-data/` |
-| Dockge | `http://127.0.0.1:5001` | `http://dockge:5001` | `dockge-data/`, `dockge-stacks/` |
-| Docker deployment DinD | app su `127.0.0.1:18000-18099` | usato da Dockge | `dockge-docker-data/` |
+| Dockge | `http://<IP-server>:5001` | `http://dockge:5001` | `dockge-data/`, `dockge-stacks/` |
+| Vikunja | `http://<IP-server>:3456` | `http://vikunja:3456` | volumi `vikunja_db`, `vikunja_files` |
+| Docker deployment DinD | app autorizzate dal proxy | usato da Dockge | `dockge-docker-data/` |
 | PostgreSQL | `127.0.0.1:15432` | `postgres:5432` | `postgres-data/` |
 | Redis | `127.0.0.1:16379` | `redis:6379` | `redis-data/` |
 | MongoDB | `127.0.0.1:27018` | `mongodb:27017` | `mongodb-data/`, `mongodb-config/` |
@@ -43,21 +45,22 @@ chmod 600 .env
 
 Modificare `.env` e sostituire **tutte** le password `change-me-*`. Le variabili
 obbligatorie sono `VSCODE_PASSWORD`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD` e
-`MONGO_ROOT_PASSWORD`. Avviare quindi:
+`MONGO_ROOT_PASSWORD`. Impostare inoltre `GITEA_ROOT_URL` e
+`VIKUNJA_PUBLIC_URL` con l'IP o il dominio pubblico del server. Avviare quindi:
 
 ```bash
 docker compose up -d
 docker compose ps
 ```
 
-Aprire `http://127.0.0.1:8443`. Il certificato TLS e l'autenticazione di rete
-andrebbero terminati in un reverse proxy se si vuole esporre il servizio oltre
-localhost.
+Aprire `http://<IP-server>:8443`. La porta parla HTTP; per un'esposizione su
+Internet occorre terminare TLS davanti a questo proxy e applicare regole di
+accesso adeguate.
 
 Per avviare soltanto l'IDE e Docker-in-Docker, senza Gitea e database:
 
 ```bash
-docker compose up -d docker volume-init vscode
+docker compose up -d docker volume-init vscode reverse-proxy
 ```
 
 Il runner Gitea è nel profilo opzionale `gitea-ci` e va avviato dopo aver
@@ -212,7 +215,8 @@ ciò che serve.
 Copiare `.env.example` in `.env`, mantenere l'attuale `VSCODE_PASSWORD` e
 sostituire tutte le password `change-me-*` prima dell'avvio. I servizi sono
 raggiungibili da VS Code con i nomi `gitea`, `postgres`, `redis` e `mongodb`.
-Le porte pubblicate sull'host sono limitate a `127.0.0.1`.
+Le interfacce web passano dal reverse proxy; database e SSH Gitea rimangono
+limitati a `127.0.0.1`.
 
 Esempi di connessione dal terminale o dalle applicazioni eseguite in VS Code:
 
@@ -250,9 +254,9 @@ dell'host e sopravvivono a restart, `down` e ricreazione dei container.
 
 ### Prima configurazione e amministratore
 
-1. Avviare Gitea con `docker compose up -d gitea`.
+1. Avviare Gitea con `docker compose up -d gitea reverse-proxy`.
 2. Attendere lo stato healthy con `docker compose ps gitea`.
-3. Aprire `http://127.0.0.1:3001`.
+3. Aprire `http://<IP-server>:3001`.
 4. Nel wizard lasciare **SQLite3** e il percorso proposto, quindi compilare la
    sezione per creare il primo account amministratore.
 
@@ -279,7 +283,7 @@ docker compose --profile gitea-ci logs -f gitea-runner
 
 ## Dockge con Docker-in-Docker isolato
 
-Dockge è disponibile su `http://127.0.0.1:5001`. Al primo accesso crea
+Dockge è disponibile su `http://<IP-server>:5001`. Al primo accesso crea
 l'account amministratore. La UI controlla esclusivamente il servizio
 `dockge-docker` tramite `tcp://dockge-docker:2375`: il socket
 `/var/run/docker.sock` dell'host non viene montato in nessuno dei due servizi.
@@ -287,7 +291,7 @@ l'account amministratore. La UI controlla esclusivamente il servizio
 Avvio e controllo:
 
 ```bash
-docker compose up -d dockge-docker dockge
+docker compose up -d dockge-docker dockge reverse-proxy
 docker compose ps dockge-docker dockge
 docker compose logs -f dockge
 ```
@@ -325,11 +329,13 @@ selezionare **Scan Stacks Folder**, scegliere `vite-login-app` e premere
 **Start** o **Update**. L'app sarà raggiungibile su:
 
 ```text
-http://127.0.0.1:18081
+http://<IP-server>:18081
 ```
 
-Il container annidato non può pubblicare porte arbitrarie sull'host: il Compose
-principale espone soltanto l'intervallo `18000-18099`, configurabile nel `.env`.
+Il container annidato non pubblica porte direttamente sull'host. Per aggiungere
+un'altra app, autorizzare esplicitamente la sua porta nel servizio
+`reverse-proxy` e aggiungere il relativo blocco `server` in
+`reverse-proxy/nginx.conf`.
 Per aggiornare `latest`, dalla UI usare **Update**; `pull_policy: always` forza
 il pull prima della ricreazione.
 
